@@ -4,7 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>FET Timetable & Excel Schedule Extractor (Multi-File)</title>
-  <!-- Optional SheetJS for full .xlsx export with offline native fallback -->
+  <!-- ExcelJS for Rich Colorful .xlsx export & SheetJS fallback -->
+  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <style>
     :root {
@@ -2062,9 +2063,9 @@
     }
 
     // ========================================================
-    // EXCEL WORKBOOK EXPORT (MULTI-SHEET)
+    // RICH COLORFUL EXCEL EXPORT (EXCELJS + SHEETJS FALLBACK)
     // ========================================================
-    function exportToExcel() {
+    async function exportToExcel() {
       if (!selectedStaff || unifiedSessions.length === 0) {
         alert("Please select an instructor with sessions to export.");
         return;
@@ -2079,22 +2080,385 @@
       const maxSlots = 18;
       const staffName = selectedStaff.name || selectedStaff.raw;
       const staffId = selectedStaff.id || 'N/A';
+      const staffDept = selectedStaff.department || 'MSE';
+      const totalSlots = unifiedSessions.reduce((sum, s) => sum + s.duration, 0);
+      const totalHours = (totalSlots * 0.5).toFixed(1);
+      const activeDays = Array.from(new Set(unifiedSessions.map(s => s.day))).sort((a, b) => (dayOrder[a] ?? 99) - (dayOrder[b] ?? 99));
+      const freeDays = days.filter(d => !activeDays.includes(d));
 
-      if (typeof XLSX !== 'undefined') {
+      const DAY_PALETTE = {
+        "Sa": { fill: "FFE0E7FF", font: "FF3730A3" }, // Indigo
+        "Su": { fill: "FFFEF3C7", font: "FF92400E" }, // Amber
+        "Mo": { fill: "FFDCFCE7", font: "FF166534" }, // Emerald
+        "Tu": { fill: "FFFCE7F3", font: "FF9D174D" }, // Pink
+        "We": { fill: "FFE0F2FE", font: "FF0369A1" }, // Sky
+        "Th": { fill: "FFFFEDD5", font: "FF9A3412" }, // Orange
+        "Fr": { fill: "FFFEE2E2", font: "FF991B1B" }
+      };
+
+      const filename = 'Schedule_' + staffId + '_' + staffName.replace(/[^a-zA-Z0-9_-]/g, '_') + '.xlsx';
+
+      if (typeof ExcelJS !== 'undefined') {
+        const wb = new ExcelJS.Workbook();
+        wb.creator = 'FET Multi-File Extractor';
+        wb.created = new Date();
+
+        // ----------------------------------------------------
+        // SHEET 1: Weekly Timetable Grid (Colorful & Styled)
+        // ----------------------------------------------------
+        const wsGrid = wb.addWorksheet('Weekly Timetable Grid', {
+          views: [{ showGridLines: true }]
+        });
+
+        // Row 1: Title Banner
+        wsGrid.mergeCells('A1:G1');
+        const cTitle = wsGrid.getCell('A1');
+        cTitle.value = 'Faculty of Engineering MSA University — Teaching Timetable (Fall 2026)';
+        cTitle.font = { name: 'Segoe UI', size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+        cTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A8A' } };
+        cTitle.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+        wsGrid.getRow(1).height = 28;
+
+        // Row 2: Subtitle Info
+        wsGrid.mergeCells('A2:G2');
+        const cSub = wsGrid.getCell('A2');
+        cSub.value = 'Instructor: ' + staffName + '   |   Staff ID: ' + staffId + '   |   Department: ' + staffDept + '   |   Time Basis: 30-min from 08:00 AM';
+        cSub.font = { name: 'Segoe UI', size: 10, color: { argb: 'FFE2E8F0' } };
+        cSub.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF172554' } };
+        cSub.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+        wsGrid.getRow(2).height = 20;
+
+        // Row 4: KPI Summary Cards
+        wsGrid.getRow(4).height = 30;
+        const kpiConfigs = [
+          { range: 'B4:C4', label: 'TOTAL HOURS: ' + totalHours + ' hrs (' + totalSlots + ' slots)', bg: 'FFEFF6FF', fg: 'FF1E40AF' },
+          { range: 'D4:D4', label: 'SESSIONS: ' + unifiedSessions.length + ' sessions', bg: 'FFF0FDF4', fg: 'FF166534' },
+          { range: 'E4:E4', label: 'TEACHING: ' + activeDays.length + ' days', bg: 'FFFEF3C7', fg: 'FF92400E' },
+          { range: 'F4:G4', label: 'FREE: ' + freeDays.length + ' days (' + (freeDays.join(', ') || 'None') + ')', bg: 'FFF8FAFC', fg: 'FF475569' }
+        ];
+
+        kpiConfigs.forEach(k => {
+          if (k.range.includes(':')) {
+            wsGrid.mergeCells(k.range);
+          }
+          const startCoord = k.range.split(':')[0];
+          const cell = wsGrid.getCell(startCoord);
+          cell.value = k.label;
+          cell.font = { name: 'Segoe UI', size: 9.5, bold: true, color: { argb: k.fg } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: k.bg } };
+          cell.alignment = { horizontal: 'center', vertical: 'middle' };
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            right: { style: 'thin', color: { argb: 'FFCBD5E1' } }
+          };
+        });
+
+        // Row 6: Table Headers
+        wsGrid.getRow(6).height = 26;
+        const timeHeaderCell = wsGrid.getCell('A6');
+        timeHeaderCell.value = 'Time Slot';
+        timeHeaderCell.font = { name: 'Segoe UI', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+        timeHeaderCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A8A' } };
+        timeHeaderCell.alignment = { horizontal: 'center', vertical: 'middle' };
+        timeHeaderCell.border = {
+          top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+          left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+          bottom: { style: 'double', color: { argb: 'FF1E3A8A' } },
+          right: { style: 'thin', color: { argb: 'FFCBD5E1' } }
+        };
+
+        const colLetters = ['B', 'C', 'D', 'E', 'F', 'G'];
+        days.forEach((d, idx) => {
+          const cLetter = colLetters[idx];
+          if (!cLetter) return;
+          const cell = wsGrid.getCell(cLetter + '6');
+          cell.value = (DAY_NAMES[d] || d) + ' (' + d + ')';
+          const pal = DAY_PALETTE[d] || { fill: 'FFE2E8F0', font: 'FF1E293B' };
+          cell.font = { name: 'Segoe UI', size: 10, bold: true, color: { argb: pal.font } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: pal.fill } };
+          cell.alignment = { horizontal: 'center', vertical: 'middle' };
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            bottom: { style: 'double', color: { argb: 'FF1E3A8A' } },
+            right: { style: 'thin', color: { argb: 'FFCBD5E1' } }
+          };
+        });
+
+        // Grid Rows 7-24 (Slots 1-18)
+        const dayToColLetter = {};
+        days.forEach((d, idx) => { dayToColLetter[d] = colLetters[idx]; });
+
+        for (let s = 1; s <= maxSlots; s++) {
+          const r = s + 6;
+          wsGrid.getRow(r).height = 28;
+
+          const timeCell = wsGrid.getCell('A' + r);
+          timeCell.value = 'Slot #' + s + '\n' + getSlotTimeStr(s);
+          timeCell.font = { name: 'Segoe UI', size: 8.5, bold: true, color: { argb: 'FF1E293B' } };
+          timeCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: s % 2 === 1 ? 'FFF1F5F9' : 'FFFFFFFF' } };
+          timeCell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+          timeCell.border = {
+            top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            right: { style: 'thin', color: { argb: 'FFCBD5E1' } }
+          };
+
+          // Empty cell defaults
+          days.forEach((d, idx) => {
+            const cLetter = colLetters[idx];
+            if (!cLetter) return;
+            const empCell = wsGrid.getCell(cLetter + r);
+            empCell.value = '—';
+            empCell.font = { name: 'Segoe UI', size: 8.5, color: { argb: 'FFCBD5E1' } };
+            empCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: s % 2 === 1 ? 'FFFAFAFA' : 'FFFFFFFF' } };
+            empCell.alignment = { horizontal: 'center', vertical: 'middle' };
+            empCell.border = {
+              top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+              left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+              bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+              right: { style: 'thin', color: { argb: 'FFCBD5E1' } }
+            };
+          });
+        }
+
+        // Place Session Blocks
+        unifiedSessions.forEach(sess => {
+          const cLetter = dayToColLetter[sess.day];
+          if (!cLetter) return;
+          const rStart = sess.slotStart + 6;
+          const rEnd = sess.slotEnd + 6;
+
+          if (sess.duration > 1) {
+            wsGrid.mergeCells(cLetter + rStart + ':' + cLetter + rEnd);
+          }
+
+          const startMin = (sess.slotStart - 1) * 30;
+          const endMin = sess.slotEnd * 30;
+          const timeSpan = formatMin(startMin) + ' - ' + formatMin(endMin) + ' (' + (sess.duration * 0.5) + 'h)';
+          const roomSpan = sess.room ? ('Room: ' + sess.room) : '';
+          const grpSpan = (sess.groups && sess.groups.length > 0) ? ('Groups: ' + sess.groups.join(', ')) : '';
+
+          const lines = [sess.subject, timeSpan];
+          if (roomSpan) lines.push(roomSpan);
+          if (grpSpan) lines.push(grpSpan);
+
+          const cell = wsGrid.getCell(cLetter + rStart);
+          cell.value = lines.join('\n');
+          cell.font = { name: 'Segoe UI', size: 8.5, bold: true, color: { argb: 'FF1E3A8A' } };
+          cell.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true, indent: 1 };
+
+          for (let rowIdx = rStart; rowIdx <= rEnd; rowIdx++) {
+            const mCell = wsGrid.getCell(cLetter + rowIdx);
+            mCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF6FF' } };
+            mCell.border = {
+              top: { style: 'medium', color: { argb: 'FF2563EB' } },
+              left: { style: 'medium', color: { argb: 'FF2563EB' } },
+              bottom: { style: 'medium', color: { argb: 'FF2563EB' } },
+              right: { style: 'medium', color: { argb: 'FF2563EB' } }
+            };
+          }
+        });
+
+        wsGrid.getColumn(1).width = 18;
+        colLetters.forEach((cL, idx) => {
+          if (idx < days.length) wsGrid.getColumn(idx + 2).width = 30;
+        });
+
+        // ----------------------------------------------------
+        // SHEET 2: Detailed Agenda & Activities
+        // ----------------------------------------------------
+        const wsAgenda = wb.addWorksheet('Agenda & Details', {
+          views: [{ showGridLines: true }]
+        });
+
+        wsAgenda.mergeCells('A1:H1');
+        const agTitle = wsAgenda.getCell('A1');
+        agTitle.value = 'Teaching Activities & Agenda — ' + staffName + ' (ID: ' + staffId + ')';
+        agTitle.font = { name: 'Segoe UI', size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+        agTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A8A' } };
+        agTitle.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+        wsAgenda.getRow(1).height = 28;
+
+        wsAgenda.mergeCells('A2:H2');
+        const agSub = wsAgenda.getCell('A2');
+        agSub.value = 'Total Hours: ' + totalHours + ' hrs   |   Total Sessions: ' + unifiedSessions.length + '   |   Department: ' + staffDept;
+        agSub.font = { name: 'Segoe UI', size: 10, color: { argb: 'FFE2E8F0' } };
+        agSub.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF172554' } };
+        agSub.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+        wsAgenda.getRow(2).height = 20;
+
+        const agHeaders = ["#", "Day", "Time Interval", "Duration", "Slot Range", "Course / Subject", "Hall / Room", "Student Groups"];
+        wsAgenda.getRow(4).height = 24;
+        agHeaders.forEach((h, idx) => {
+          const cell = wsAgenda.getCell(String.fromCharCode(65 + idx) + '4');
+          cell.value = h;
+          cell.font = { name: 'Segoe UI', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A8A' } };
+          cell.alignment = { horizontal: 'center', vertical: 'middle' };
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            right: { style: 'thin', color: { argb: 'FFCBD5E1' } }
+          };
+        });
+
+        unifiedSessions.forEach((s, idx) => {
+          const r = idx + 5;
+          wsAgenda.getRow(r).height = 22;
+          const startMin = (s.slotStart - 1) * 30;
+          const endMin = s.slotEnd * 30;
+          const tInt = formatMin(startMin) + ' - ' + formatMin(endMin);
+          const durStr = (s.duration * 0.5).toFixed(1) + ' hrs';
+          const sRange = 'Slots ' + s.slotStart + ' - ' + s.slotEnd;
+          const pal = DAY_PALETTE[s.day] || { fill: 'FFE2E8F0', font: 'FF1E293B' };
+          const rowBg = idx % 2 === 0 ? 'FFFFFFFF' : 'FFF8FAFC';
+
+          const colsConfig = [
+            { col: 'A', val: idx + 1, align: 'center', bg: rowBg, fg: 'FF64748B', bold: true },
+            { col: 'B', val: (DAY_NAMES[s.day] || s.day) + ' (' + s.day + ')', align: 'center', bg: pal.fill, fg: pal.font, bold: true },
+            { col: 'C', val: tInt, align: 'center', bg: 'FFDCFCE7', fg: 'FF166534', bold: true },
+            { col: 'D', val: durStr, align: 'center', bg: rowBg, fg: 'FF1E3A8A', bold: true },
+            { col: 'E', val: sRange, align: 'center', bg: rowBg, fg: 'FF64748B', bold: false },
+            { col: 'F', val: s.subject, align: 'left', bg: rowBg, fg: 'FF1E3A8A', bold: true },
+            { col: 'G', val: s.room || '', align: 'center', bg: 'FFDBEAFE', fg: 'FF1E40AF', bold: true },
+            { col: 'H', val: (s.groups || []).join(', '), align: 'left', bg: 'FFFEF3C7', fg: 'FF92400E', bold: false }
+          ];
+
+          colsConfig.forEach(c => {
+            const cell = wsAgenda.getCell(c.col + r);
+            cell.value = c.val;
+            cell.font = { name: 'Segoe UI', size: 9, bold: c.bold, color: { argb: c.fg } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: c.bg } };
+            cell.alignment = { horizontal: c.align, vertical: 'middle', indent: c.align === 'left' ? 1 : 0 };
+            cell.border = {
+              top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+              left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+              bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+              right: { style: 'thin', color: { argb: 'FFCBD5E1' } }
+            };
+          });
+        });
+
+        wsAgenda.getColumn(1).width = 6;
+        wsAgenda.getColumn(2).width = 16;
+        wsAgenda.getColumn(3).width = 24;
+        wsAgenda.getColumn(4).width = 14;
+        wsAgenda.getColumn(5).width = 16;
+        wsAgenda.getColumn(6).width = 46;
+        wsAgenda.getColumn(7).width = 16;
+        wsAgenda.getColumn(8).width = 40;
+
+        // ----------------------------------------------------
+        // SHEET 3: Daily Summary & Gaps Analysis
+        // ----------------------------------------------------
+        const wsSum = wb.addWorksheet('Daily Summary & Gaps', {
+          views: [{ showGridLines: true }]
+        });
+
+        wsSum.mergeCells('A1:H1');
+        const sumTitle = wsSum.getCell('A1');
+        sumTitle.value = 'Daily Workload & Gap Analysis — ' + staffName;
+        sumTitle.font = { name: 'Segoe UI', size: 14, bold: true, color: { argb: 'FFFFFFFF' } };
+        sumTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A8A' } };
+        sumTitle.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
+        wsSum.getRow(1).height = 28;
+
+        const sumHdrs = ["Day", "Day Name", "Day Status", "Teaching Hours", "Half-Hour Slots", "Sessions", "Working Span", "Idle Gap Hours"];
+        wsSum.getRow(3).height = 24;
+        sumHdrs.forEach((h, idx) => {
+          const cell = wsSum.getCell(String.fromCharCode(65 + idx) + '3');
+          cell.value = h;
+          cell.font = { name: 'Segoe UI', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1E3A8A' } };
+          cell.alignment = { horizontal: 'center', vertical: 'middle' };
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+            right: { style: 'thin', color: { argb: 'FFCBD5E1' } }
+          };
+        });
+
+        days.forEach((d, idx) => {
+          const r = idx + 4;
+          wsSum.getRow(r).height = 22;
+          const pal = DAY_PALETTE[d] || { fill: 'FFE2E8F0', font: 'FF1E293B' };
+          const dSess = unifiedSessions.filter(s => s.day === d).sort((a,b)=>a.slotStart - b.slotStart);
+
+          const isTeach = dSess.length > 0;
+          const daySlots = isTeach ? dSess.reduce((sum, s) => sum + s.duration, 0) : 0;
+          const dayHrs = (daySlots * 0.5).toFixed(1);
+          let span = '—';
+          let gaps = 0;
+          if (isTeach) {
+            span = formatMin((dSess[0].slotStart - 1) * 30) + ' - ' + formatMin(dSess[dSess.length - 1].slotEnd * 30);
+            let gapSlots = 0;
+            for (let i = 0; i < dSess.length - 1; i++) {
+              const g = dSess[i+1].slotStart - dSess[i].slotEnd - 1;
+              if (g > 0) gapSlots += g;
+            }
+            gaps = (gapSlots * 0.5).toFixed(1);
+          }
+
+          const sumConfig = [
+            { col: 'A', val: d, align: 'center', bg: pal.fill, fg: pal.font, bold: true },
+            { col: 'B', val: DAY_NAMES[d] || d, align: 'center', bg: pal.fill, fg: pal.font, bold: true },
+            { col: 'C', val: isTeach ? 'Teaching Day' : 'Free Day', align: 'center', bg: isTeach ? 'FFDCFCE7' : 'FFF1F5F9', fg: isTeach ? 'FF166534' : 'FF64748B', bold: true },
+            { col: 'D', val: isTeach ? (dayHrs + ' hrs') : '—', align: 'center', bg: 'FFFFFFFF', fg: isTeach ? 'FF1E3A8A' : 'FF94A3B8', bold: isTeach },
+            { col: 'E', val: isTeach ? daySlots : '—', align: 'center', bg: 'FFFFFFFF', fg: isTeach ? 'FF334155' : 'FF94A3B8', bold: false },
+            { col: 'F', val: isTeach ? dSess.length : '—', align: 'center', bg: 'FFFFFFFF', fg: isTeach ? 'FF334155' : 'FF94A3B8', bold: false },
+            { col: 'G', val: span, align: 'center', bg: 'FFFFFFFF', fg: 'FF1E293B', bold: false },
+            { col: 'H', val: isTeach ? (gaps + ' hrs') : '0.0 hrs', align: 'center', bg: 'FFFFFFFF', fg: gaps > 0 ? 'FFDC2626' : 'FF166534', bold: gaps > 0 }
+          ];
+
+          sumConfig.forEach(c => {
+            const cell = wsSum.getCell(c.col + r);
+            cell.value = c.val;
+            cell.font = { name: 'Segoe UI', size: 9, bold: c.bold, color: { argb: c.fg } };
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: c.bg } };
+            cell.alignment = { horizontal: c.align, vertical: 'middle' };
+            cell.border = {
+              top: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+              left: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+              bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } },
+              right: { style: 'thin', color: { argb: 'FFCBD5E1' } }
+            };
+          });
+        });
+
+        wsSum.getColumn(1).width = 8;
+        wsSum.getColumn(2).width = 16;
+        wsSum.getColumn(3).width = 18;
+        wsSum.getColumn(4).width = 16;
+        wsSum.getColumn(5).width = 16;
+        wsSum.getColumn(6).width = 12;
+        wsSum.getColumn(7).width = 24;
+        wsSum.getColumn(8).width = 16;
+
+        // Write and download buffer
+        const buffer = await wb.xlsx.writeBuffer();
+        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+
+      } else if (typeof XLSX !== 'undefined') {
+        // Fallback to SheetJS
         const wb = XLSX.utils.book_new();
-
-        // SHEET 1: Weekly Timetable Grid
-        const gridData = [];
-        gridData.push(['STAFF WEEKLY TIMETABLE - TIME BASIS']);
-        gridData.push([
-          'Instructor: ' + staffName,
-          'Staff ID: ' + staffId,
-          'Department: ' + (selectedStaff.department || ''),
-          'Total Hours: ' + (unifiedSessions.reduce((a,b)=>a+b.duration,0)*0.5).toFixed(1) + ' hrs'
-        ]);
-        gridData.push(['Loaded Files: ' + loadedFiles.map(f=>f.name).join('; ')]);
-        gridData.push([]);
-
+        const gridData = [
+          ['STAFF WEEKLY TIMETABLE - ' + staffName + ' (' + staffId + ')'],
+          ['Department: ' + staffDept, 'Total Hours: ' + totalHours + ' hrs (' + totalSlots + ' slots)'],
+          []
+        ];
         const headerRow = ["Time Slot", "Slot #"];
         days.forEach(d => headerRow.push((DAY_NAMES[d] || d) + ' (' + d + ')'));
         gridData.push(headerRow);
@@ -2113,101 +2477,8 @@
         }
 
         const wsGrid = XLSX.utils.aoa_to_sheet(gridData);
-        wsGrid['!cols'] = [{ wch: 18 }, { wch: 8 }, ...days.map(() => ({ wch: 38 }))];
         XLSX.utils.book_append_sheet(wb, wsGrid, "Weekly Timetable");
-
-        // SHEET 2: Detailed Agenda
-        const agendaHeaders = [
-          "Day", "Day Name", "Start Time", "End Time", "Duration (Hrs)",
-          "Slots (0.5h)", "Slot Range", "Course / Subject", "Student Groups",
-          "Hall / Room", "Source Files", "Instructor Name", "Instructor ID"
-        ];
-        const agendaRows = [agendaHeaders];
-
-        unifiedSessions.forEach(s => {
-          const startMin = (s.slotStart - 1) * 30;
-          const endMin = s.slotEnd * 30;
-          agendaRows.push([
-            s.day,
-            DAY_NAMES[s.day] || s.day,
-            formatMin(startMin),
-            formatMin(endMin),
-            (s.duration * 0.5),
-            s.duration,
-            'Slot ' + s.slotStart + ' - ' + s.slotEnd,
-            s.subject,
-            s.groups.join(', '),
-            s.room,
-            s.sourceFiles.join(', '),
-            staffName,
-            staffId
-          ]);
-        });
-
-        const wsAgenda = XLSX.utils.aoa_to_sheet(agendaRows);
-        wsAgenda['!cols'] = [
-          { wch: 8 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 14 },
-          { wch: 12 }, { wch: 16 }, { wch: 40 }, { wch: 25 }, { wch: 15 },
-          { wch: 30 }, { wch: 25 }, { wch: 15 }
-        ];
-        XLSX.utils.book_append_sheet(wb, wsAgenda, "Detailed Agenda");
-
-        // SHEET 3: Daily Summary & Gaps
-        const summaryHeaders = ["Day", "Day Name", "Status", "Teaching Hours", "Slots (0.5h)", "Sessions Count", "First Session", "Last Session", "Gap Hours", "Gap Slots"];
-        const summaryRows = [summaryHeaders];
-
-        days.forEach(d => {
-          const daySessions = unifiedSessions.filter(s => s.day === d).sort((a,b)=>a.slotStart - b.slotStart);
-          if (daySessions.length === 0) {
-            summaryRows.push([d, DAY_NAMES[d] || d, "Off / Free Day", 0, 0, 0, "-", "-", 0, 0]);
-          } else {
-            const daySlots = daySessions.reduce((sum, s) => sum + s.duration, 0);
-            const firstSess = daySessions[0];
-            const lastSess = daySessions[daySessions.length - 1];
-            const firstStart = formatMin((firstSess.slotStart - 1) * 30);
-            const lastEnd = formatMin(lastSess.slotEnd * 30);
-
-            let dayGaps = 0;
-            for (let i = 0; i < daySessions.length - 1; i++) {
-              const g = daySessions[i + 1].slotStart - daySessions[i].slotEnd - 1;
-              if (g > 0) dayGaps += g;
-            }
-
-            summaryRows.push([
-              d,
-              DAY_NAMES[d] || d,
-              "Teaching Day",
-              daySlots * 0.5,
-              daySlots,
-              daySessions.length,
-              firstStart,
-              lastEnd,
-              dayGaps * 0.5,
-              dayGaps
-            ]);
-          }
-        });
-
-        const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
-        wsSummary['!cols'] = [
-          { wch: 8 }, { wch: 14 }, { wch: 16 }, { wch: 14 }, { wch: 12 },
-          { wch: 15 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }
-        ];
-        XLSX.utils.book_append_sheet(wb, wsSummary, "Daily Summary");
-
-        // SHEET 4: Loaded Source Files
-        const filesHeaders = ["Slot #", "File Name", "Size", "Extracted Sessions Count", "Detected Staff Count"];
-        const filesRows = [filesHeaders];
-        loadedFiles.forEach((f, idx) => {
-          filesRows.push([idx + 1, f.name, formatBytes(f.size), f.sessions.length, f.teachers.length]);
-        });
-        const wsFiles = XLSX.utils.aoa_to_sheet(filesRows);
-        wsFiles['!cols'] = [{ wch: 8 }, { wch: 60 }, { wch: 15 }, { wch: 25 }, { wch: 25 }];
-        XLSX.utils.book_append_sheet(wb, wsFiles, "Source Files Info");
-
-        const filename = 'Schedule_' + staffId + '_' + staffName.replace(/[^a-zA-Z0-9_-]/g, '_') + '.xlsx';
         XLSX.writeFile(wb, filename);
-
       } else {
         exportToCsv();
       }
