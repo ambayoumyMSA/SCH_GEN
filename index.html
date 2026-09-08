@@ -626,6 +626,27 @@
     .tag-groups { background: #fef3c7; color: #92400e; }
     .tag-files { background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; }
 
+    .session-card.has-conflict {
+      background: #fff7ed;
+      border: 1.5px solid #fb923c !important;
+    }
+
+    .conflict-warning {
+      margin-top: 6px;
+      padding: 3px 6px;
+      background: #ffedd5;
+      color: #9a3412;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .session-conflict-block {
+      margin-top: 6px;
+      padding-top: 6px;
+      border-top: 1px dashed #fb923c;
+    }
+
     /* Agenda Table View */
     .agenda-table {
       width: 100%;
@@ -1216,6 +1237,10 @@
 
       if (EMBEDDED_SAMPLE) {
         loadEmbeddedSample();
+      }
+
+      if (/[?&]selftest=1\b/.test(location.search)) {
+        runSelfChecks();
       }
     });
 
@@ -1837,25 +1862,35 @@
         });
       });
 
-      // Deduplicate sessions across files by (day, slotStart, slotEnd)
-      // When same session is present across files (e.g. groups + subgroups), combine their groups and source files
+      // Deduplicate sessions across files by a stable identity: (day, slotStart, subject, room).
+      // This handles the true-duplicate case (the same session appearing in multiple FET
+      // representations/files, sometimes with slightly different detected slotEnd/rowspan)
+      // by merging them and taking the widest observed duration, WITHOUT collapsing genuinely
+      // distinct simultaneous sessions that merely share a start time (different subject and/or
+      // room). Keying only on (day, slotStart, slotEnd) previously caused two different
+      // durations detected for the *same* logical session to be treated as separate entries,
+      // which corrupted the rendered grid (see buildTimetableGrid / renderGrid below).
       const dedupMap = {};
 
       rawMatches.forEach(s => {
-        const key = s.day + '_' + s.slotStart + '_' + s.slotEnd;
+        const normSubject = (s.subject || '').trim().toLowerCase();
+        const normRoom = (s.room || '').trim().toLowerCase();
+        const key = s.day + '_' + s.slotStart + '_' + normSubject + '_' + normRoom;
 
         if (!dedupMap[key]) {
           dedupMap[key] = {
             day: s.day,
             slotStart: s.slotStart,
             slotEnd: s.slotEnd,
-            duration: s.duration,
             subject: s.subject,
             room: s.room,
             groups: new Set(s.groups || []),
             sourceFiles: new Set([s.sourceFile])
           };
         } else {
+          // Same logical session re-observed (e.g. via groups + subgroups files): widen the
+          // duration to cover the full span reported by any source instead of overwriting it.
+          dedupMap[key].slotEnd = Math.max(dedupMap[key].slotEnd, s.slotEnd);
           (s.groups || []).forEach(g => dedupMap[key].groups.add(g));
           dedupMap[key].sourceFiles.add(s.sourceFile);
           if (!dedupMap[key].room && s.room) dedupMap[key].room = s.room;
@@ -1869,7 +1904,7 @@
         day: s.day,
         slotStart: s.slotStart,
         slotEnd: s.slotEnd,
-        duration: s.duration,
+        duration: s.slotEnd - s.slotStart + 1,
         subject: s.subject,
         room: s.room,
         groups: Array.from(s.groups),
@@ -1951,24 +1986,108 @@
       }, 50);
     }
 
-    function renderGrid(daysList) {
-      const table = document.getElementById('timetable-table');
-      const maxSlots = 18;
+    const GRID_MAX_SLOTS = 18;
 
+    // ========================================================
+    // GRID LAYOUT BUILDER
+    // ========================================================
+    // Builds a slot x day grid where each cell is one of:
+    //   - null            : empty, no session
+    //   - 'SPAN'          : covered by a rowspan from an earlier row in the same column
+    //   - { primary, extra, rowspan } : a rendered <td>; `primary` starts here and spans
+    //                        `rowspan` rows, `extra` holds any genuinely simultaneous
+    //                        sessions that could not get their own row without corrupting
+    //                        the table (i.e. real conflicts), folded into this same cell.
+    //
+    // A session spans from slotStart through slotEnd continuously (rowspan = slotEnd -
+    // slotStart + 1) as long as no other session for the same day starts before that span
+    // ends. If a later session's start falls inside an already-open span (a genuine
+    // simultaneous conflict), it is folded into the open cell's `extra` list instead of
+    // emitting a new <td> mid-span, which would otherwise create more/less cells than
+    // there are columns and visually shift every following day's column (the "empty /
+    // misaligned rows" defect).
+    function buildTimetableGrid(sessionsList, daysList, maxSlots) {
       const grid = {};
       for (let s = 1; s <= maxSlots; s++) {
         grid[s] = {};
         daysList.forEach(d => grid[s][d] = null);
       }
 
-      unifiedSessions.forEach(sess => {
-        if (grid[sess.slotStart] && sess.day in grid[sess.slotStart]) {
-          grid[sess.slotStart][sess.day] = sess;
-          for (let s = sess.slotStart + 1; s <= sess.slotEnd; s++) {
-            if (grid[s]) grid[s][sess.day] = 'SPAN';
+      const conflicts = [];
+
+      daysList.forEach(day => {
+        const daySessions = sessionsList
+          .filter(s => s.day === day)
+          .slice()
+          .sort((a, b) => (a.slotStart - b.slotStart) || ((b.slotEnd - b.slotStart) - (a.slotEnd - a.slotStart)));
+
+        let occupiedUntil = 0; // last slot index already rendered (start row or spanned) in this column
+        let anchorSlot = null; // row index of the currently open card for this day
+
+        daySessions.forEach(sess => {
+          const start = Math.max(1, sess.slotStart);
+          const end = Math.min(maxSlots, sess.slotEnd);
+          if (start > maxSlots || end < 1) return;
+
+          if (start <= occupiedUntil && anchorSlot !== null) {
+            // Genuine overlap with the currently open card: fold it in rather than
+            // emitting a structurally-invalid extra <td>.
+            const anchorCell = grid[anchorSlot][day];
+            if (anchorCell && anchorCell !== 'SPAN') {
+              anchorCell.extra.push(sess);
+            }
+            conflicts.push({ day: day, slot: start, session: sess });
+            occupiedUntil = Math.max(occupiedUntil, end);
+            return;
           }
-        }
+
+          grid[start][day] = { primary: sess, extra: [], rowspan: end - start + 1 };
+          for (let s = start + 1; s <= end; s++) {
+            grid[s][day] = 'SPAN';
+          }
+          occupiedUntil = end;
+          anchorSlot = start;
+        });
       });
+
+      return { grid: grid, conflicts: conflicts };
+    }
+
+    function renderSessionCardHtml(sess, isConflictExtra) {
+      const startMin = (sess.slotStart - 1) * 30;
+      const endMin = sess.slotEnd * 30;
+      const timeInterval = formatMin(startMin) + ' - ' + formatMin(endMin);
+      const durationHrs = sess.duration * 0.5;
+
+      return (isConflictExtra ? '<div class="session-conflict-block">' : '') +
+        '<div class="session-title">' + escapeHtml(sess.subject) + '</div>' +
+        '<div class="session-meta-tags">' +
+          '<span class="tag tag-time">' + timeInterval + ' (' + durationHrs + 'h)</span>' +
+          (sess.room ? '<span class="tag tag-room">🏛️ ' + escapeHtml(sess.room) + '</span>' : '') +
+        '</div>' +
+        (sess.groups && sess.groups.length > 0 ? (
+          '<div style="margin-top: 4px;">' +
+            '<span class="tag tag-groups">👥 ' + escapeHtml(sess.groups.join(', ')) + '</span>' +
+          '</div>'
+        ) : '') +
+        (sess.sourceFiles && sess.sourceFiles.length > 1 ? (
+          '<div style="margin-top: 4px;">' +
+            '<span class="tag tag-files">📁 In ' + sess.sourceFiles.length + ' files</span>' +
+          '</div>'
+        ) : '') +
+        (isConflictExtra ? '</div>' : '');
+    }
+
+    function renderGrid(daysList) {
+      const table = document.getElementById('timetable-table');
+      const maxSlots = GRID_MAX_SLOTS;
+
+      const layout = buildTimetableGrid(unifiedSessions, daysList, maxSlots);
+      const grid = layout.grid;
+
+      if (layout.conflicts.length > 0) {
+        console.warn('Timetable conflicts detected (simultaneous sessions folded into one cell):', layout.conflicts);
+      }
 
       let html = '<thead><tr><th class="time-col">Time Slot</th>';
       daysList.forEach(d => {
@@ -1985,26 +2104,14 @@
           if (item === 'SPAN') {
             return;
           } else if (item) {
-            const startMin = (item.slotStart - 1) * 30;
-            const endMin = item.slotEnd * 30;
-            const timeInterval = formatMin(startMin) + ' - ' + formatMin(endMin);
-            const durationHrs = item.duration * 0.5;
+            const hasConflict = item.extra.length > 0;
+            const cardClass = 'session-card' + (hasConflict ? ' has-conflict' : '');
 
-            html += '<td rowspan="' + item.duration + '" class="session-card">' +
-              '<div class="session-title">' + escapeHtml(item.subject) + '</div>' +
-              '<div class="session-meta-tags">' +
-                '<span class="tag tag-time">' + timeInterval + ' (' + durationHrs + 'h)</span>' +
-                (item.room ? '<span class="tag tag-room">🏛️ ' + escapeHtml(item.room) + '</span>' : '') +
-              '</div>' +
-              (item.groups && item.groups.length > 0 ? (
-                '<div style="margin-top: 4px;">' +
-                  '<span class="tag tag-groups">👥 ' + escapeHtml(item.groups.join(', ')) + '</span>' +
-                '</div>'
-              ) : '') +
-              (item.sourceFiles && item.sourceFiles.length > 1 ? (
-                '<div style="margin-top: 4px;">' +
-                  '<span class="tag tag-files">📁 In ' + item.sourceFiles.length + ' files</span>' +
-                '</div>'
+            html += '<td rowspan="' + item.rowspan + '" class="' + cardClass + '">' +
+              renderSessionCardHtml(item.primary, false) +
+              (hasConflict ? (
+                '<div class="conflict-warning">⚠ ' + item.extra.length + ' conflicting session(s) at this time</div>' +
+                item.extra.map(s => renderSessionCardHtml(s, true)).join('')
               ) : '') +
             '</td>';
           } else {
@@ -2542,6 +2649,130 @@
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#039;');
     }
+
+    // ========================================================
+    // LIGHTWEIGHT BROWSER-RUNNABLE REGRESSION SELF-CHECKS
+    // ========================================================
+    // No build system / test runner is used in this single-file app. These checks exercise
+    // the core slot-span and conflict-safe grid logic directly in the browser console.
+    // Run by opening index.html?selftest=1, or by calling runSelfChecks() from devtools.
+    function runSelfChecks() {
+      const results = [];
+      function check(name, actual, expected) {
+        const pass = JSON.stringify(actual) === JSON.stringify(expected);
+        results.push({ name: name, pass: pass, actual: actual, expected: expected });
+        if (!pass) {
+          console.error('[FAIL] ' + name, { actual: actual, expected: expected });
+        } else {
+          console.log('[PASS] ' + name);
+        }
+      }
+
+      // 1. A 2-hour (4-slot) session must render as one continuous rowspan covering all
+      //    of its slots, with every intermediate row marked as spanned (not a new card,
+      //    not empty).
+      (function () {
+        const sessions = [
+          { day: 'Th', slotStart: 5, slotEnd: 8, duration: 4, subject: 'Tutorial', room: 'C312', groups: ['A1'], sourceFiles: ['f1.html'] }
+        ];
+        const layout = buildTimetableGrid(sessions, ['Th'], 18);
+        const cell5 = layout.grid[5]['Th'];
+        check('2h session spans all covered rows', {
+          startIsCard: !!(cell5 && cell5 !== 'SPAN'),
+          rowspan: cell5 && cell5.rowspan,
+          slot6: layout.grid[6]['Th'],
+          slot7: layout.grid[7]['Th'],
+          slot8: layout.grid[8]['Th'],
+          slot9IsEmpty: layout.grid[9]['Th'] === null
+        }, {
+          startIsCard: true,
+          rowspan: 4,
+          slot6: 'SPAN',
+          slot7: 'SPAN',
+          slot8: 'SPAN',
+          slot9IsEmpty: true
+        });
+      })();
+
+      // 2. Duplicate detection of the same logical session with two different observed
+      //    durations (e.g. detected via two files) should widen to the full span, not
+      //    create two competing entries that corrupt the grid.
+      (function () {
+        const raw = [
+          { day: 'Th', slotStart: 5, slotEnd: 5, subject: 'Tutorial', room: 'C312', groups: ['A1'], sourceFile: 'f1.html' },
+          { day: 'Th', slotStart: 5, slotEnd: 8, subject: 'Tutorial', room: 'C312', groups: ['A2'], sourceFile: 'f2.html' }
+        ];
+        const dedupMap = {};
+        raw.forEach(s => {
+          const key = s.day + '_' + s.slotStart + '_' + s.subject.trim().toLowerCase() + '_' + s.room.trim().toLowerCase();
+          if (!dedupMap[key]) {
+            dedupMap[key] = { day: s.day, slotStart: s.slotStart, slotEnd: s.slotEnd, subject: s.subject, room: s.room, groups: new Set(s.groups), sourceFiles: new Set([s.sourceFile]) };
+          } else {
+            dedupMap[key].slotEnd = Math.max(dedupMap[key].slotEnd, s.slotEnd);
+            s.groups.forEach(g => dedupMap[key].groups.add(g));
+            dedupMap[key].sourceFiles.add(s.sourceFile);
+          }
+        });
+        const merged = Object.values(dedupMap);
+        check('duplicate session widened to full span', {
+          count: merged.length,
+          slotEnd: merged[0] && merged[0].slotEnd,
+          groups: merged[0] && Array.from(merged[0].groups).sort()
+        }, {
+          count: 1,
+          slotEnd: 8,
+          groups: ['A1', 'A2']
+        });
+      })();
+
+      // 3. Distinct simultaneous sessions (same day/start, different subject or room) must
+      //    NOT be merged just because they share a time slot.
+      (function () {
+        const raw = [
+          { day: 'Th', slotStart: 5, slotEnd: 6, subject: 'Engineering Materials', room: 'C312', groups: ['GSE200 A'], sourceFile: 'f1.html' },
+          { day: 'Th', slotStart: 5, slotEnd: 6, subject: 'Engineering Materials', room: 'B101', groups: ['GSE200 B'], sourceFile: 'f1.html' }
+        ];
+        const dedupMap = {};
+        raw.forEach(s => {
+          const key = s.day + '_' + s.slotStart + '_' + s.subject.trim().toLowerCase() + '_' + s.room.trim().toLowerCase();
+          if (!dedupMap[key]) {
+            dedupMap[key] = { day: s.day, slotStart: s.slotStart, slotEnd: s.slotEnd, subject: s.subject, room: s.room, groups: new Set(s.groups), sourceFiles: new Set([s.sourceFile]) };
+          } else {
+            dedupMap[key].slotEnd = Math.max(dedupMap[key].slotEnd, s.slotEnd);
+          }
+        });
+        check('distinct simultaneous sessions preserved (different room)', Object.keys(dedupMap).length, 2);
+      })();
+
+      // 4. Genuine conflicts (two sessions overlapping in the same day/column) must be
+      //    folded into a single cell instead of producing a mismatched cell count, so
+      //    later days in the row are never shifted out of alignment.
+      (function () {
+        const sessions = [
+          { day: 'Th', slotStart: 5, slotEnd: 8, duration: 4, subject: 'Engineering Materials A', room: 'C312', groups: ['GSE200 A'], sourceFiles: ['f1.html'] },
+          { day: 'Th', slotStart: 6, slotEnd: 7, duration: 2, subject: 'Engineering Materials B', room: 'B101', groups: ['GSE200 B'], sourceFiles: ['f1.html'] },
+          { day: 'We', slotStart: 6, slotEnd: 6, duration: 1, subject: 'Unrelated', room: 'A1', groups: [], sourceFiles: ['f1.html'] }
+        ];
+        const daysList = ['We', 'Th'];
+        const layout = buildTimetableGrid(sessions, daysList, 18);
+        let renderedCellsRow6 = 0;
+        daysList.forEach(d => { if (layout.grid[6][d] && layout.grid[6][d] !== 'SPAN') renderedCellsRow6++; });
+        check('overlapping session folded, no extra cell created in row 6', {
+          conflictsDetected: layout.conflicts.length,
+          renderedCellsRow6: renderedCellsRow6,
+          extraOnAnchor: layout.grid[5]['Th'] && layout.grid[5]['Th'].extra.length
+        }, {
+          conflictsDetected: 1,
+          renderedCellsRow6: 1,
+          extraOnAnchor: 1
+        });
+      })();
+
+      const failed = results.filter(r => !r.pass);
+      console.log((failed.length === 0 ? '✅ All' : '❌ ' + failed.length + '/' + results.length) + ' self-checks passed (' + results.length + ' total).');
+      return { total: results.length, failed: failed.length, results: results };
+    }
   </script>
 </body>
 </html>
+
