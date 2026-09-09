@@ -1214,9 +1214,12 @@
       setupUploadEvents();
       setupSearchEvents();
 
-      if (EMBEDDED_SAMPLE) {
-        loadEmbeddedSample();
-      }
+      // FIX: Do NOT auto-load the bundled demo dataset on page open.
+      // Previously this ran unconditionally on every load (and even
+      // auto-searched staff ID 12061), silently overriding whatever
+      // real FET file the user was about to upload with stale sample
+      // data. The sample is now only loaded if the user explicitly
+      // clicks a "Load Sample Data" control (see loadEmbeddedSample()).
     });
 
     // ========================================================
@@ -1461,10 +1464,28 @@
           const slotNum = parseInt(yTh.textContent.trim());
           if (isNaN(slotNum)) return;
 
-          const tds = Array.from(tr.children).filter(c => c.tagName.toLowerCase() === 'td');
+          // FIX: Real FET exports mark a column that is still covered by an
+          // earlier row's rowspan with an HTML comment (e.g. "<!-- span -->")
+          // instead of emitting a <td>. Comment nodes are NOT included in
+          // tr.children, so the previous code -- which only counted actual
+          // <td> elements -- silently skipped past those placeholder columns
+          // and shifted every later cell in the row onto the wrong day.
+          // We now walk every child node (elements AND comments) in DOM
+          // order and advance the day pointer for each column position,
+          // so a <td> only gets attributed to the day it is really in.
+          const rowChildren = Array.from(tr.childNodes).filter(n =>
+            (n.nodeType === 1 && n.tagName.toLowerCase() === 'td') ||
+            n.nodeType === 8 /* Comment */
+          );
           let colIdx = 0;
 
-          tds.forEach(child => {
+          rowChildren.forEach(child => {
+            if (child.nodeType === 8) {
+              // Placeholder for a column already spanned by a prior row.
+              colIdx++;
+              return;
+            }
+
             const dayName = days[colIdx] || ('Day' + (colIdx + 1));
             const rowspan = parseInt(child.getAttribute('rowspan')) || 1;
 
@@ -1837,12 +1858,16 @@
         });
       });
 
-      // Deduplicate sessions across files by (day, slotStart, slotEnd)
-      // When same session is present across files (e.g. groups + subgroups), combine their groups and source files
+      // Deduplicate sessions across files by (day, slotStart, slotEnd, subject)
+      // When same session is present across files (e.g. groups + subgroups), combine their groups and source files.
+      // FIX: the subject is now part of the key. Keying on (day, slotStart,
+      // slotEnd) alone could silently merge two genuinely different courses
+      // that happen to land on the same day/slot range, discarding one of
+      // them from the exported schedule.
       const dedupMap = {};
 
       rawMatches.forEach(s => {
-        const key = s.day + '_' + s.slotStart + '_' + s.slotEnd;
+        const key = s.day + '_' + s.slotStart + '_' + s.slotEnd + '_' + (s.subject || '');
 
         if (!dedupMap[key]) {
           dedupMap[key] = {
@@ -2097,6 +2122,13 @@
       };
 
       const filename = 'Schedule_' + staffId + '_' + staffName.replace(/[^a-zA-Z0-9_-]/g, '_') + '.xlsx';
+
+      // FIX: the entire export body below previously had no error handling.
+      // If ExcelJS threw at any point (e.g. attempting to merge a cell range
+      // that overlaps a previous merge), the function aborted silently with
+      // no visible feedback -- indistinguishable from the button "not
+      // working". Now any failure is reported to the user and logged.
+      try {
 
       if (typeof ExcelJS !== 'undefined') {
         const wb = new ExcelJS.Workbook();
@@ -2481,6 +2513,13 @@
         XLSX.writeFile(wb, filename);
       } else {
         exportToCsv();
+      }
+
+      } catch (err) {
+        console.error('exportToExcel failed:', err);
+        alert('Export to Excel failed: ' + (err && err.message ? err.message : err) +
+          '\n\nFalling back to CSV export instead.');
+        try { exportToCsv(); } catch (e2) { console.error('exportToCsv fallback also failed:', e2); }
       }
     }
 
